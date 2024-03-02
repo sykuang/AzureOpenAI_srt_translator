@@ -2,19 +2,27 @@
 
 import srt
 import argparse
-import openai
+from openai import AzureOpenAI
 import json
 import os
+from dotenv import load_dotenv
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+load_dotenv()  # take environment variables from .env.
 
-if not openai.api_key:
-    exit("Error: OPENAI_API_KEY is not defined. Please set the environment variable and try again.")
 
-BATCHSIZE = 50 # later i may use a token conter instead but this is simpler for now
+BATCHSIZE = 50  # later i may use a token conter instead but this is simpler for now
 LANG = "french"
 MODEL = "gpt-3.5-turbo"
 VERBOSE = False
+
+
+def getClient(azure_endpoint, api_key, api_version="2024-02-15-preview"):
+    return AzureOpenAI(
+        azure_endpoint=os.getenv("OPENAI_ENDPOINT"),
+        api_key=os.getenv("OPENAI_API_KEY"),
+        api_version="2024-02-15-preview",
+    )
+
 
 def makeprompt():
     global prompt
@@ -24,25 +32,28 @@ Translate the text below line by line into {LANG}, do not add any content on you
 these are subtitles, meaning each elements are related and in order, you can use this context to make a better translation.
 you will reply with a json array that only contain the translation."""
 
+
 def makebatch(chunk):
     return [x.content for x in chunk]
 
-def translate_batch(batch):
+
+def translate_batch(client, batch):
     blen = len(batch)
     tbatch = []
     batch = json.dumps(batch, ensure_ascii=False)
-
     lendiff = 1
-    while lendiff != 0: # TODO add max retry ?
+    while lendiff != 0:  # TODO add max retry ?
         try:
-            completion = openai.ChatCompletion.create(
+            print(batch)
+            completion = client.chat.completions.create(
                 model=MODEL,
                 messages=[
                     {"role": "system", "content": prompt},
-                    {"role": "user", "content": batch}
-                ]
+                    {"role": "user", "content": batch},
+                ],
             )
             tbatch = json.loads(completion.choices[0].message.content)
+            print(tbatch)
         except Exception as e:
             if VERBOSE:
                 print(e)
@@ -51,34 +62,60 @@ def translate_batch(batch):
             lendiff = len(tbatch) - blen
     return tbatch
 
-def translate_file(subs):
+
+def translate_file(client, subs):
     total_batch = (len(subs) + BATCHSIZE - 1) // BATCHSIZE
     for i in range(0, len(subs), BATCHSIZE):
         print(f"batch {i//BATCHSIZE + 1} / {total_batch}")
 
-        chunk = subs[i:i+BATCHSIZE]
+        chunk = subs[i : i + BATCHSIZE]
         batch = makebatch(chunk)
-        batch = translate_batch(batch)
+        batch = translate_batch(client, batch)
 
         for j, n in enumerate(batch):
             chunk[j].content = n
+
 
 def get_translated_filename(filepath):
     root, ext = os.path.splitext(os.path.basename(filepath))
     return f"{root}_{LANG}{ext}"
 
+
 def main():
     parser = argparse.ArgumentParser(description="Translate srt files")
-    parser.add_argument("files", help="File pattern to match",nargs="+")
-    parser.add_argument("-l", "--language", help="Specify the language", default="french", type=str)
-    parser.add_argument("-b", "--batch_size", help="Specify the batch size", default=50, type=int)
-    parser.add_argument("-m", "--model", help="openai's model to use", default="gpt-3.5-turbo", type=str)
-    parser.add_argument("-v", "--verbose", help="display errors", action="store_true")
+    parser.add_argument("files", help="File pattern to match", nargs="+")
+    parser.add_argument(
+        "-l", "--language", help="Specify the language", default="french", type=str
+    )
+    parser.add_argument(
+        "-b", "--batch_size", help="Specify the batch size", default=50, type=int
+    )
+    parser.add_argument(
+        "-m", "--model", help="openai's model to use", default="gpt-3.5-turbo", type=str
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        help="display errors and debug infomration",
+        action="store_true",
+    )
+    parser.add_argument(
+        "-a",
+        "--api_version",
+        help="Azure OpenAI version",
+        default="2024-02-15-preview",
+        type=str,
+    )
 
     args = parser.parse_args()
 
     files = args.files
-
+    azure_endpoint = os.getenv("OPENAI_ENDPOINT")
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not azure_endpoint or not api_key:
+        print("Please set OPENAI_ENDPOINT and OPENAI_API_KEY in your environment.")
+        return
+    client = getClient(azure_endpoint, api_key, args.api_version)
     global LANG, BATCHSIZE, MODEL, VERBOSE
     LANG = args.language
     BATCHSIZE = args.batch_size
@@ -100,11 +137,12 @@ def main():
         # tbatch = translate_batch(batch)
         # print(tbatch)
 
-        translate_file(subs)
+        translate_file(client, subs)
         output = srt.compose(subs)
 
-        with open(get_translated_filename(filename),"w") as handle:
+        with open(get_translated_filename(filename), "w") as handle:
             handle.write(output)
+
 
 if __name__ == "__main__":
     main()
