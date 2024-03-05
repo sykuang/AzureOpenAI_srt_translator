@@ -6,6 +6,7 @@ from openai import AzureOpenAI
 import json
 import os
 from dotenv import load_dotenv
+from time import sleep
 
 load_dotenv()  # take environment variables from .env.
 
@@ -37,12 +38,12 @@ def makebatch(chunk):
     return [x.content for x in chunk]
 
 
-def translate_batch(client, batch):
+def translate_batch(client, batch, maxretry=5):
     blen = len(batch)
     tbatch = []
     batch = json.dumps(batch, ensure_ascii=False)
     lendiff = 1
-    while lendiff != 0:  # TODO add max retry ?
+    while lendiff != 0 and maxretry > 0:  # TODO add max retry ?
         try:
             print(batch)
             completion = client.chat.completions.create(
@@ -58,22 +59,28 @@ def translate_batch(client, batch):
             if VERBOSE:
                 print(e)
             lendiff = 1
+            maxretry -= 1
         else:
             lendiff = len(tbatch) - blen
     return tbatch
 
 
-def translate_file(client, subs):
+def translate_file(client, subs, maxretry=5):
     total_batch = (len(subs) + BATCHSIZE - 1) // BATCHSIZE
     for i in range(0, len(subs), BATCHSIZE):
         print(f"batch {i//BATCHSIZE + 1} / {total_batch}")
 
         chunk = subs[i : i + BATCHSIZE]
         batch = makebatch(chunk)
-        batch = translate_batch(client, batch)
-
-        for j, n in enumerate(batch):
-            chunk[j].content = n
+        batch = translate_batch(client, batch, maxretry)
+        if len(batch) != len(chunk):
+            for j in range(len(chunk)):
+                ret = translate_batch(client, [chunk[j].content], maxretry)
+                if len(ret) > 0:
+                    chunk[j].content = ret[0]
+        else:
+            for j, n in enumerate(batch):
+                chunk[j].content = n
 
 
 def get_translated_filename(filepath):
@@ -106,7 +113,9 @@ def main():
         default="2024-02-15-preview",
         type=str,
     )
-
+    parser.add_argument(
+        "--max_retry", help="max retry for a batch", default=5, type=int
+    )
     args = parser.parse_args()
 
     files = args.files
